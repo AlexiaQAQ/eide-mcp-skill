@@ -117,11 +117,14 @@ def mcp_tool_call(mcp_url: str, session_id: str, method: str, params: dict = Non
 
 # ── 构建辅助 ──────────────────────────────────────────────
 
-def _ensure_reload(session_id: str, uid: str, mcp_url: str, no_reload: bool) -> dict:
+def _ensure_reload(session_id: str, uid: str, mcp_url: str, no_reload: bool, workspace: str = "") -> dict:
     """构建/重建前自动 reload。"""
     if no_reload:
         return {"status": "ok", "skipped": True}
-    return mcp_tool_call(mcp_url, session_id, "eide_reload", {"uid": uid})
+    result = mcp_tool_call(mcp_url, session_id, "eide_reload", {"uid": uid})
+    if workspace:
+        _sync_eide_model(workspace)
+    return result
 
 
 def _parse_build_result(text: str) -> tuple:
@@ -137,10 +140,10 @@ def _parse_build_result(text: str) -> tuple:
     return errors, warnings, hex_file
 
 
-def _exec_build(session_id: str, uid: str, mcp_url: str, action: str, eide_tool: str,
-                no_reload: bool) -> dict:
+def _exec_build(session_id: str, uid: str, mcp_url: str, workspace: str,
+                action: str, eide_tool: str, no_reload: bool) -> dict:
     """build/rebuild 共享逻辑：reload → 编译 → 解析。"""
-    rr = _ensure_reload(session_id, uid, mcp_url, no_reload)
+    rr = _ensure_reload(session_id, uid, mcp_url, no_reload, workspace)
     reload_failed = rr.get("status") == "error" or rr.get("result", {}).get("isError")
     if reload_failed:
         err = rr.get("error") or rr.get("result", {}).get("content", [{}])[0].get("text", "未知错误")
@@ -168,6 +171,77 @@ def _exec_build(session_id: str, uid: str, mcp_url: str, action: str, eide_tool:
 
 
 # ── 命令处理 ──────────────────────────────────────────────
+
+# ── EIDE 模型同步 ─────────────────────────────────────────
+# EIDE 的 eide_reload MCP 只会从 uvproj *添加* 新文件，不会删除已移除的组。
+# 下面这个函数在 reload 后手动同步删除。
+
+
+def _get_uvproj_groups(workspace: str) -> set:
+    """解析 Keil uvproj XML，返回所有 group 名称。"""
+    import xml.etree.ElementTree as ET
+    for f in os.listdir(workspace):
+        if f.endswith('.uvproj'):
+            tree = ET.parse(os.path.join(workspace, f))
+            groups = set()
+            for g in tree.iter('Group'):
+                gn = g.find('GroupName')
+                if gn is not None and gn.text:
+                    groups.add(gn.text)
+            return groups
+    return set()
+
+
+def _sync_eide_model(workspace: str) -> dict:
+    """Reload 后清理 EIDE 模型中已从 uvproj 删除的文件夹组。"""
+    groups = _get_uvproj_groups(workspace)
+    if not groups:
+        return {"status": "skipped", "reason": "no uvproj groups"}
+
+    yml = os.path.join(workspace, ".eide", "eide.yml")
+    if not os.path.exists(yml):
+        return {"status": "skipped", "reason": "no eide.yml"}
+
+    with open(yml, encoding="utf-8") as f:
+        lines = f.readlines()
+
+    new_lines = []
+    in_folders = False      # 是否在 virtualFolder.folders 块内
+    skip_block = False      # 当前 folder 是否需要跳过
+
+    for line in lines:
+        stripped = line.strip()
+
+        # 未进入 folders: 块 → 直接保留
+        if not in_folders:
+            new_lines.append(line)
+            if stripped == "folders:" and line.startswith("  ") and not line.startswith("    "):
+                in_folders = True
+            continue
+
+        # 检测 folder 条目 "    - name: XXX"
+        if stripped.startswith("- name:") and line.startswith("    "):
+            name = stripped.split(":", 1)[1].strip()
+            skip_block = name not in groups
+            if not skip_block:
+                new_lines.append(line)
+            continue
+
+        # 退出 folders: 块
+        if line.lstrip().startswith("dependenceList"):
+            in_folders = False
+            new_lines.append(line)
+            continue
+
+        # 当前 folder 内普通行
+        if not skip_block:
+            new_lines.append(line)
+
+    with open(yml, "w", encoding="utf-8") as f:
+        f.writelines(new_lines)
+
+    return {"status": "ok"}
+
 
 def _assert_session(action: str, session: dict):
     """MCP 初始化失败时打印错误并退出命令。"""
@@ -205,11 +279,16 @@ def cmd_reload(args):
     if _assert_session("reload", session): return
 
     r = mcp_tool_call(args.mcp_url, session["session_id"], "eide_reload", {"uid": uid})
+    clean_result = _sync_eide_model(args.workspace)
+
     if r.get("result"):
         text = "\n".join(c.get("text", "") for c in r["result"].get("content", []) if c.get("type") == "text")
         err = r["result"].get("isError", False)
+        msg = f"reload {'成功' if not err else '失败'}"
+        if clean_result.get("status") == "ok":
+            msg += "，已同步删除已移除的文件"
         print(json.dumps({"status": "ok" if not err else "error", "action": "reload",
-                          "summary": f"reload {'成功' if not err else '失败'}", "details": {"uid": uid, "log": text[:1000]}}))
+                          "summary": msg, "details": {"uid": uid, "log": text[:1000]}}))
     else:
         print(json.dumps({"status": "error", "action": "reload", "error": r.get("error", {})}))
 
@@ -237,7 +316,7 @@ def cmd_build(args):
     if _assert_uid("build", uid): return
     session = _mcp_init(args.mcp_url)
     if _assert_session("build", session): return
-    print(json.dumps(_exec_build(session["session_id"], uid, args.mcp_url,
+    print(json.dumps(_exec_build(session["session_id"], uid, args.mcp_url, args.workspace,
                                  "build", "eide_build", args.no_reload)))
 
 
@@ -246,7 +325,7 @@ def cmd_rebuild(args):
     if _assert_uid("rebuild", uid): return
     session = _mcp_init(args.mcp_url)
     if _assert_session("rebuild", session): return
-    print(json.dumps(_exec_build(session["session_id"], uid, args.mcp_url,
+    print(json.dumps(_exec_build(session["session_id"], uid, args.mcp_url, args.workspace,
                                  "rebuild", "eide_rebuild", args.no_reload)))
 
 
