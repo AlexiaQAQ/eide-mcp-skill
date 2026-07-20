@@ -53,8 +53,9 @@ Or simply mention "EIDE" in Claude Code — the skill triggers automatically.
 | Command | Risk | Description |
 |---------|------|-------------|
 | `/eide check` | low | Ping the MCP server |
-| `/eide build` | medium | Incremental build |
-| `/eide rebuild` | medium | Full rebuild |
+| `/eide reload` | low | Reload project — sync Keil uvproj changes into EIDE model |
+| `/eide build` | medium | Incremental build (auto-reloads before build) |
+| `/eide rebuild` | medium | Full rebuild (auto-reloads before rebuild) |
 | `/eide clean` | high | Clean build artifacts |
 | `/eide flash` | high | Program flash (–erase-all to erase chip first) |
 
@@ -105,8 +106,9 @@ python <skill-dir>/scripts/eide.py flash --erase-all    # 烧录
 | 命令 | 风险 | 说明 |
 |------|------|------|
 | `/eide check` | 低 | 检测 MCP 服务器连通性 |
-| `/eide build` | 中 | 增量编译 |
-| `/eide rebuild` | 中 | 全量重建 |
+| `/eide reload` | 低 | 重载工程 — 同步 Keil uvproj 更改到 EIDE 模型 |
+| `/eide build` | 中 | 增量编译（自动先 reload） |
+| `/eide rebuild` | 中 | 全量重建（自动先 reload） |
 | `/eide clean` | 高 | 清理构建产物 |
 | `/eide flash` | 高 | 烧录固件（加 `--erase-all` 擦除全片） |
 

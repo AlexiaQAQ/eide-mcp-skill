@@ -45,8 +45,9 @@ python <skill-dir>/scripts/eide.py uid --workspace <工程根目录> --json
 | 子命令 | 用途 | 风险 |
 |--------|------|------|
 | `check` | 检测 MCP 服务器连通性 | 低 |
-| `build` | 增量编译 | 中 |
-| `rebuild` | 全量重建 | 中 |
+| `build` | 增量编译（先自动 reload 同步 Keil 更改） | 中 |
+| `rebuild` | 全量重建（先自动 reload 同步 Keil 更改） | 中 |
+| `reload` | 重载工程：同步 Keil uvproj 的更改到 EIDE 模型 | 低 |
 | `clean` | 清理构建产物 | 高 |
 | `flash` | 烧录固件到 MCU | 高 |
 | `uid` | 从 `.eide/eide.yml` 提取并保存 UID | 低 |
@@ -60,6 +61,12 @@ python <skill-dir>/scripts/eide.py uid --workspace <工程根目录> --json
 | `--mcp-url` | MCP 服务器 URL，默认读 config.json |
 | `--uid` | Project UID，默认读 config.json |
 | `--workspace` | 工程根目录（默认当前目录） |
+
+build / rebuild 子命令额外支持：
+
+| 参数 | 说明 |
+|------|------|
+| `--no-reload` | 跳过构建前的自动 reload（默认自动 reload） |
 
 flash 子命令额外支持：
 

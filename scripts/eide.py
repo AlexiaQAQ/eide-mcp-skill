@@ -107,6 +107,35 @@ def mcp_call(mcp_url: str, method: str, params: dict = None) -> dict:
     return {"status": "error", "error": {"code": "bad_response", "message": f"未找到 JSON 结果。原始响应: {raw[:500]}"}}
 
 
+def cmd_reload(args):
+    """重载工程：同步 Keil uvproj 的更改到 EIDE 模型。"""
+    cfg = load_config()
+    uid = args.uid or cfg.get("uid", "")
+    if not uid:
+        print(json.dumps({"status": "error", "action": "reload", "error": {"code": "no_uid"}}))
+        return
+    result = mcp_call(args.mcp_url, "eide_reload", {"uid": uid})
+    if result.get("result"):
+        content = result["result"].get("content", [])
+        text = "\n".join(c.get("text", "") for c in content if c.get("type") == "text")
+        is_error = result["result"].get("isError", False)
+        print(json.dumps({
+            "status": "ok" if not is_error else "error",
+            "action": "reload",
+            "summary": f"reload {'成功' if not is_error else '失败'}",
+            "details": {"uid": uid, "log": text[:1000]},
+        }))
+    else:
+        print(json.dumps({"status": "error", "action": "reload", "error": result.get("error", {})}))
+
+
+def _ensure_reload(uid: str, mcp_url: str, no_reload: bool) -> dict:
+    """构建/重建前自动 reload，确保 EIDE 模型与 keil uvproj 同步。"""
+    if no_reload:
+        return {"status": "ok", "action": "reload", "skipped": True}
+    return mcp_call(mcp_url, "eide_reload", {"uid": uid})
+
+
 def cmd_check(args):
     """检测 MCP 服务器是否可达。"""
     result = mcp_call(args.mcp_url, "initialize")
@@ -131,6 +160,9 @@ def cmd_build(args):
             "error": {"code": "no_uid", "message": "未提供 Project UID。可从 .eide/eide.yml 的 miscInfo.uid 获取。"}
         }))
         return
+
+    # 构建前自动 reload，同步 Keil uvproj 更改
+    reload_result = _ensure_reload(uid, args.mcp_url, args.no_reload)
 
     start = time.time()
     result = mcp_call(args.mcp_url, "eide_build", {"uid": uid})
@@ -191,6 +223,9 @@ def cmd_rebuild(args):
     if not uid:
         print(json.dumps({"status": "error", "action": "rebuild", "error": {"code": "no_uid"}}))
         return
+
+    # 重建前自动 reload，同步 Keil uvproj 更改
+    _ensure_reload(uid, args.mcp_url, args.no_reload)
 
     result = mcp_call(args.mcp_url, "eide_rebuild", {"uid": uid})
     if result.get("result"):
@@ -282,9 +317,13 @@ def main():
 
     p_check = sub.add_parser("check", help="检测 MCP 服务器连通性")
 
-    p_build = sub.add_parser("build", help="构建")
-    p_rebuild = sub.add_parser("rebuild", help="全量重建")
+    p_build = sub.add_parser("build", help="构建（自动先 reload 同步 Keil 更改）")
+    p_build.add_argument("--no-reload", action="store_true", default=False, help="跳过构建前 reload")
+    p_rebuild = sub.add_parser("rebuild", help="全量重建（自动先 reload 同步 Keil 更改）")
+    p_rebuild.add_argument("--no-reload", action="store_true", default=False, help="跳过重建前 reload")
     p_clean = sub.add_parser("clean", help="清理构建产物")
+
+    p_reload = sub.add_parser("reload", help="重载工程：同步 Keil uvproj 的更改到 EIDE 模型")
 
     p_flash = sub.add_parser("flash", help="烧录固件")
     p_flash.add_argument("--erase-all", action="store_true", default=False, help="烧录前擦除全片")
@@ -299,6 +338,8 @@ def main():
         cmd_build(args)
     elif args.command == "rebuild":
         cmd_rebuild(args)
+    elif args.command == "reload":
+        cmd_reload(args)
     elif args.command == "clean":
         cmd_clean(args)
     elif args.command == "flash":
