@@ -1,0 +1,7 @@
+{
+  "name": "eide",
+  "version": "1.0.0",
+  "description": "Claude Code skill for EIDE (Embedded IDE) — build, rebuild, clean & flash via MCP",
+  "license": "MIT",
+  "compatibility": "Requires Python 3, VSCode with EIDE extension, EIDE MCP Server enabled"
+}
