@@ -1,0 +1,11 @@
+{
+  "name": "eide-mcp-skill",
+  "description": "EIDE (Embedded IDE) build, rebuild, clean & flash via MCP — for embedded development with Claude Code",
+  "version": "1.0.0",
+  "author": {
+    "name": "AlexiaQAQ"
+  },
+  "repository": "https://github.com/AlexiaQAQ/eide-mcp-skill",
+  "license": "MIT",
+  "homepage": "https://github.com/AlexiaQAQ/eide-mcp-skill#readme"
+}
