@@ -41,12 +41,11 @@ Then restart Claude Code — the skill will auto-register.
 
 ```bash
 cd your-eide-project
-python <skill-dir>/scripts/eide.py --workspace . uid   # auto-detect Project UID
-python <skill-dir>/scripts/eide.py build                # build
+python <skill-dir>/scripts/eide.py build                # build (UID auto-detected)
 python <skill-dir>/scripts/eide.py flash --erase-all    # flash
 ```
 
-Or simply mention "EIDE" in Claude Code — the skill triggers automatically.
+No configuration needed — UID is automatically read from `.eide/eide.yml`. Or simply mention "EIDE" in Claude Code — the skill triggers automatically.
 
 ### Commands
 
@@ -55,8 +54,8 @@ Or simply mention "EIDE" in Claude Code — the skill triggers automatically.
 | `/eide check` | low | Ping the MCP server |
 | `/eide reload` | low | Reload project — sync Keil uvproj changes into EIDE model |
 | `/eide add-src-dir <path>` | medium | Add a source directory (all .c/.cpp files under it will be compiled) |
-| `/eide build` | medium | Incremental build (auto-reloads before build) |
-| `/eide rebuild` | medium | Full rebuild (auto-reloads before rebuild) |
+| `/eide build` | medium | Incremental build (auto-reloads before build; use `--no-reload` to skip) |
+| `/eide rebuild` | medium | Full rebuild (auto-reloads before rebuild; use `--no-reload` to skip) |
 | `/eide clean` | high | Clean build artifacts |
 | `/eide flash` | high | Program flash (–erase-all to erase chip first) |
 
@@ -95,12 +94,11 @@ git clone https://github.com/AlexiaQAQ/eide-mcp-skill.git %USERPROFILE%\.claude\
 
 ```bash
 cd 你的工程目录
-python <skill-dir>/scripts/eide.py --workspace . uid   # 自动获取 UID
-python <skill-dir>/scripts/eide.py build                # 编译
+python <skill-dir>/scripts/eide.py build                # 编译（UID 自动检测）
 python <skill-dir>/scripts/eide.py flash --erase-all    # 烧录
 ```
 
-或者在 Claude Code 中说「用 EIDE 编译一下」，技能会自动触发。
+无需额外配置，UID 自动从 `.eide/eide.yml` 读取。或者在 Claude Code 中说「用 EIDE 编译一下」，技能会自动触发。
 
 ### 命令一览
 
@@ -109,8 +107,8 @@ python <skill-dir>/scripts/eide.py flash --erase-all    # 烧录
 | `/eide check` | 低 | 检测 MCP 服务器连通性 |
 | `/eide reload` | 低 | 重载工程 — 同步 Keil uvproj 更改到 EIDE 模型 |
 | `/eide add-src-dir <path>` | 中 | 添加源码目录，该目录下的 .c/.cpp 文件参与编译 |
-| `/eide build` | 中 | 增量编译（自动先 reload） |
-| `/eide rebuild` | 中 | 全量重建（自动先 reload） |
+| `/eide build` | 中 | 增量编译（自动先 reload；加 `--no-reload` 跳过） |
+| `/eide rebuild` | 中 | 全量重建（自动先 reload；加 `--no-reload` 跳过） |
 | `/eide clean` | 高 | 清理构建产物 |
 | `/eide flash` | 高 | 烧录固件（加 `--erase-all` 擦除全片） |
 
@@ -119,7 +117,6 @@ python <skill-dir>/scripts/eide.py flash --erase-all    # 烧录
 ```
 eide/
 ├── SKILL.md             技能定义（前端文案 + 自动触发条件）
-├── config.example.json  配置模板（复制为 config.json 后使用）
 ├── eide-mcp-enable.png   EIDE MCP Server 设置截图
 ├── package.json         插件元数据
 ├── scripts/

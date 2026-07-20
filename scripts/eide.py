@@ -1,40 +1,46 @@
 #!/usr/bin/env python3
-"""EIDE MCP skill — 通过 EIDE MCP Server 操作嵌入式工程构建/烧录。"""
+"""EIDE MCP skill — 通过 EIDE MCP Server 操作嵌入式工程构建/烧录。
+
+UID 自动检测（无需 config.json）：
+  - 优先用 --uid 参数
+  - 否则从 <workspace>/.eide/eide.yml 自动读取
+
+Session 复用：
+  - build/rebuild 的 reload + 编译共用一次 MCP session
+"""
 
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import urllib.request
 import urllib.error
 
-CONFIG_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
+
+# ── UID 自动检测 ──────────────────────────────────────────
+
+def get_uid(workspace: str, uid_override: str = "") -> str:
+    """获取 Project UID：优先用参数，否则从 .eide/eide.yml 自动检测。"""
+    if uid_override:
+        return uid_override
+    eide_yml = os.path.join(workspace, ".eide", "eide.yml")
+    if os.path.exists(eide_yml):
+        with open(eide_yml, encoding="utf-8") as f:
+            content = f.read()
+        m = re.search(r'uid:\s*(\S+)', content)
+        if m:
+            return m.group(1)
+    return ""
 
 
-def load_config() -> dict:
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, encoding="utf-8") as f:
-            return json.load(f)
-    return {
-        "mcp_url": "http://127.0.0.1:8940/mcp",
-        "uid": "",
-        "operation_mode": 1,
-    }
+# ── MCP 通信层 ────────────────────────────────────────────
 
-
-def save_config(cfg: dict):
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=2, ensure_ascii=False)
-
-
-def mcp_call(mcp_url: str, method: str, params: dict = None) -> dict:
-    """执行一次 MCP 调用：初始化（获取 session_id）→ 实际调用。"""
-    # Step 1: Initialize, 获取 session_id
-    init_req = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
+def _mcp_init(mcp_url: str) -> dict:
+    """初始化 MCP 连接，返回 {"status": "ok", "session_id": "..."} 或错误 dict。"""
+    req_body = {
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
         "params": {
             "protocolVersion": "2024-11-05",
             "capabilities": {},
@@ -43,11 +49,8 @@ def mcp_call(mcp_url: str, method: str, params: dict = None) -> dict:
     }
     req = urllib.request.Request(
         mcp_url,
-        data=json.dumps(init_req).encode("utf-8"),
-        headers={
-            "Accept": "application/json, text/event-stream",
-            "Content-Type": "application/json",
-        },
+        data=json.dumps(req_body).encode(),
+        headers={"Accept": "application/json, text/event-stream", "Content-Type": "application/json"},
         method="POST",
     )
     try:
@@ -58,29 +61,45 @@ def mcp_call(mcp_url: str, method: str, params: dict = None) -> dict:
         return {"status": "error", "error": {"code": "mcp_connect_failed", "message": str(e)}}
 
     session_id = resp.headers.get("mcp-session-id", "")
-    # 读取并丢弃初始化响应
-    resp.read()
+    resp.read()  # 丢弃响应体
 
     if not session_id:
         return {"status": "error", "error": {"code": "no_session", "message": "未获取到 mcp-session-id"}}
+    return {"status": "ok", "session_id": session_id}
 
-    # 如果只需要初始化（如探测连接）
-    if method == "initialize":
-        return {"status": "ok", "session_id": session_id}
 
-    # Step 2: 调用实际工具
+def _parse_response(raw: str) -> dict:
+    """解析 MCP 响应：先试纯 JSON，再试 SSE data: 拼接。"""
+    text = raw.strip()
+    if text.startswith("{") or text.startswith("["):
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+    data_lines = []
+    for line in text.split("\n"):
+        line = line.strip()
+        if line.startswith("data: "):
+            data_lines.append(line[6:])
+    if data_lines:
+        try:
+            return json.loads("".join(data_lines))
+        except json.JSONDecodeError:
+            pass
+    return {"status": "error", "error": {"code": "bad_response", "message": f"未找到 JSON。原始响应: {raw[:500]}"}}
+
+
+def mcp_tool_call(mcp_url: str, session_id: str, method: str, params: dict = None) -> dict:
+    """在已初始化的 session 中调用 MCP 工具。"""
     req_body = {
         "jsonrpc": "2.0",
         "id": int(time.time() * 1000) % 100000,
         "method": "tools/call",
-        "params": {
-            "name": method,
-            "arguments": params or {},
-        },
+        "params": {"name": method, "arguments": params or {}},
     }
-    req2 = urllib.request.Request(
+    req = urllib.request.Request(
         mcp_url,
-        data=json.dumps(req_body).encode("utf-8"),
+        data=json.dumps(req_body).encode(),
         headers={
             "Accept": "application/json, text/event-stream",
             "Content-Type": "application/json",
@@ -89,292 +108,227 @@ def mcp_call(mcp_url: str, method: str, params: dict = None) -> dict:
         method="POST",
     )
     try:
-        resp2 = urllib.request.urlopen(req2, timeout=120)
+        resp = urllib.request.urlopen(req, timeout=120)
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
         return {"status": "error", "error": {"code": "mcp_call_failed", "message": str(e), "body": body}}
-
-    raw = resp2.read().decode("utf-8")
-    # 解析 SSE 格式的 result
-    for line in raw.split("\n"):
-        line = line.strip()
-        if line.startswith("data: "):
-            try:
-                return json.loads(line[6:])
-            except json.JSONDecodeError:
-                continue
-
-    return {"status": "error", "error": {"code": "bad_response", "message": f"未找到 JSON 结果。原始响应: {raw[:500]}"}}
+    return _parse_response(resp.read().decode("utf-8"))
 
 
-def cmd_reload(args):
-    """重载工程：同步 Keil uvproj 的更改到 EIDE 模型。"""
-    cfg = load_config()
-    uid = args.uid or cfg.get("uid", "")
-    if not uid:
-        print(json.dumps({"status": "error", "action": "reload", "error": {"code": "no_uid"}}))
-        return
-    result = mcp_call(args.mcp_url, "eide_reload", {"uid": uid})
-    if result.get("result"):
-        content = result["result"].get("content", [])
-        text = "\n".join(c.get("text", "") for c in content if c.get("type") == "text")
-        is_error = result["result"].get("isError", False)
-        print(json.dumps({
-            "status": "ok" if not is_error else "error",
-            "action": "reload",
-            "summary": f"reload {'成功' if not is_error else '失败'}",
-            "details": {"uid": uid, "log": text[:1000]},
-        }))
-    else:
-        print(json.dumps({"status": "error", "action": "reload", "error": result.get("error", {})}))
+# ── 构建辅助 ──────────────────────────────────────────────
 
-
-def cmd_add_src_dir(args):
-    """添加源码目录：将目录下的 .c/.cpp 文件加入编译。"""
-    cfg = load_config()
-    uid = args.uid or cfg.get("uid", "")
-    if not uid:
-        print(json.dumps({"status": "error", "action": "add-src-dir", "error": {"code": "no_uid"}}))
-        return
-    path = args.path
-    result = mcp_call(args.mcp_url, "eide_add_src_dir", {"uid": uid, "path": path})
-    if result.get("result"):
-        content = result["result"].get("content", [])
-        text = "\n".join(c.get("text", "") for c in content if c.get("type") == "text")
-        is_error = result["result"].get("isError", False)
-        print(json.dumps({
-            "status": "ok" if not is_error else "error",
-            "action": "add-src-dir",
-            "summary": f"添加源码目录 {'成功' if not is_error else '失败'}: {path}",
-            "details": {"uid": uid, "path": path, "log": text[:1000]},
-            "next_actions": [f"下次 build/rebuild 时会自动编译 {path} 下的源文件"],
-        }))
-    else:
-        print(json.dumps({"status": "error", "action": "add-src-dir", "error": result.get("error", {})}))
-
-
-def _ensure_reload(uid: str, mcp_url: str, no_reload: bool) -> dict:
-    """构建/重建前自动 reload，确保 EIDE 模型与 keil uvproj 同步。"""
+def _ensure_reload(session_id: str, uid: str, mcp_url: str, no_reload: bool) -> dict:
+    """构建/重建前自动 reload。"""
     if no_reload:
-        return {"status": "ok", "action": "reload", "skipped": True}
-    return mcp_call(mcp_url, "eide_reload", {"uid": uid})
+        return {"status": "ok", "skipped": True}
+    return mcp_tool_call(mcp_url, session_id, "eide_reload", {"uid": uid})
+
+
+def _parse_build_result(text: str) -> tuple:
+    """从构建日志提取 (errors, warnings, hex_file)。"""
+    em = re.search(r'(\d+)\s*[Ee]rror\s*\(', text)
+    wm = re.search(r'(\d+)\s*[Ww]arning\s*\(', text)
+    errors = int(em.group(1)) if em else 0
+    warnings = int(wm.group(1)) if wm else 0
+    hex_file = ""
+    for line in text.split("\n"):
+        if "file path:" in line.lower() or ".hex" in line:
+            hex_file = line.split(":", 1)[-1].strip().strip('"')
+    return errors, warnings, hex_file
+
+
+def _exec_build(session_id: str, uid: str, mcp_url: str, action: str, eide_tool: str,
+                no_reload: bool) -> dict:
+    """build/rebuild 共享逻辑：reload → 编译 → 解析。"""
+    rr = _ensure_reload(session_id, uid, mcp_url, no_reload)
+    reload_failed = rr.get("status") == "error" or rr.get("result", {}).get("isError")
+    if reload_failed:
+        err = rr.get("error") or rr.get("result", {}).get("content", [{}])[0].get("text", "未知错误")
+        return {"status": "warning", "action": action,
+                "summary": f"reload 失败，取消{action}", "details": {"uid": uid, "reload_error": err}}
+
+    start = time.time()
+    result = mcp_tool_call(mcp_url, session_id, eide_tool, {"uid": uid})
+    elapsed = time.time() - start
+
+    if not result.get("result"):
+        return {"status": "error", "action": action, "error": result.get("error", {"message": "未知错误"})}
+
+    text = "\n".join(c.get("text", "") for c in result["result"].get("content", []) if c.get("type") == "text")
+    is_error = result["result"].get("isError", False)
+    errors, warnings, hex_file = _parse_build_result(text)
+    ok = not is_error and errors == 0
+
+    return {
+        "status": "ok" if ok else "error", "action": action,
+        "summary": f"{action} {'成功' if ok else '失败'}，errors={errors} warnings={warnings}",
+        "details": {"uid": uid, "hex_file": hex_file, "build_log": text[:2000]},
+        "metrics": {"errors": errors, "warnings": warnings, "elapsed_ms": int(elapsed * 1000)},
+    }
+
+
+# ── 命令处理 ──────────────────────────────────────────────
+
+def _assert_session(action: str, session: dict):
+    """MCP 初始化失败时打印错误并退出命令。"""
+    if session.get("status") != "ok":
+        print(json.dumps({"status": "error", "action": action, "error": session.get("error", {})}))
+        return True
+    return False
+
+
+def _assert_uid(action: str, uid: str) -> bool:
+    """缺少 UID 时打印错误。"""
+    if not uid:
+        print(json.dumps(
+            {"status": "error", "action": action,
+             "error": {"code": "no_uid",
+                       "message": "未提供 UID。用 --uid 指定，或在工程目录下运行（自动从 .eide/eide.yml 检测）"}}))
+        return True
+    return False
 
 
 def cmd_check(args):
-    """检测 MCP 服务器是否可达。"""
-    result = mcp_call(args.mcp_url, "initialize")
-    if result.get("status") == "ok":
-        print(json.dumps({
-            "status": "ok",
-            "action": "check",
-            "summary": f"EIDE MCP 服务器可达 (session: {result['session_id'][:8]}...)",
-        }))
+    """检测 MCP 服务器可达性。"""
+    r = _mcp_init(args.mcp_url)
+    if r.get("status") == "ok":
+        print(json.dumps({"status": "ok", "action": "check",
+                          "summary": f"EIDE MCP 服务器可达 (session: {r['session_id'][:8]}...)"}))
     else:
-        print(json.dumps(result))
-    return
+        print(json.dumps(r))
+
+
+def cmd_reload(args):
+    uid = get_uid(args.workspace, args.uid)
+    if _assert_uid("reload", uid): return
+    session = _mcp_init(args.mcp_url)
+    if _assert_session("reload", session): return
+
+    r = mcp_tool_call(args.mcp_url, session["session_id"], "eide_reload", {"uid": uid})
+    if r.get("result"):
+        text = "\n".join(c.get("text", "") for c in r["result"].get("content", []) if c.get("type") == "text")
+        err = r["result"].get("isError", False)
+        print(json.dumps({"status": "ok" if not err else "error", "action": "reload",
+                          "summary": f"reload {'成功' if not err else '失败'}", "details": {"uid": uid, "log": text[:1000]}}))
+    else:
+        print(json.dumps({"status": "error", "action": "reload", "error": r.get("error", {})}))
+
+
+def cmd_add_src_dir(args):
+    uid = get_uid(args.workspace, args.uid)
+    if _assert_uid("add-src-dir", uid): return
+    session = _mcp_init(args.mcp_url)
+    if _assert_session("add-src-dir", session): return
+
+    r = mcp_tool_call(args.mcp_url, session["session_id"], "eide_add_src_dir", {"uid": uid, "path": args.path})
+    if r.get("result"):
+        text = "\n".join(c.get("text", "") for c in r["result"].get("content", []) if c.get("type") == "text")
+        err = r["result"].get("isError", False)
+        print(json.dumps({"status": "ok" if not err else "error", "action": "add-src-dir",
+                          "summary": f"添加源码目录 {'成功' if not err else '失败'}: {args.path}",
+                          "details": {"uid": uid, "path": args.path, "log": text[:1000]},
+                          "next_actions": [f"下次 build/rebuild 会编译 {args.path} 下的源文件"]}))
+    else:
+        print(json.dumps({"status": "error", "action": "add-src-dir", "error": r.get("error", {})}))
 
 
 def cmd_build(args):
-    cfg = load_config()
-    uid = args.uid or cfg.get("uid", "")
-    if not uid:
-        print(json.dumps({
-            "status": "error",
-            "action": "build",
-            "error": {"code": "no_uid", "message": "未提供 Project UID。可从 .eide/eide.yml 的 miscInfo.uid 获取。"}
-        }))
-        return
-
-    # 构建前自动 reload，同步 Keil uvproj 更改
-    reload_result = _ensure_reload(uid, args.mcp_url, args.no_reload)
-
-    start = time.time()
-    result = mcp_call(args.mcp_url, "eide_build", {"uid": uid})
-    elapsed = time.time() - start
-
-    if result.get("result"):
-        content = result["result"].get("content", [])
-        text = "\n".join(c.get("text", "") for c in content if c.get("type") == "text")
-        is_error = result["result"].get("isError", False)
-
-        # 从日志文本解析错误/警告数量
-        errors = 0
-        warnings = 0
-        for line in text.split("\n"):
-            if "ERROR(S)" in line.upper() or "error(s)" in line.lower():
-                parts = line.split()
-                for p in parts:
-                    if p.isdigit():
-                        errors = int(p)
-                        break
-            if "WARNING(S)" in line.upper() or "warning(s)" in line.lower():
-                parts = line.split()
-                for p in parts:
-                    if p.isdigit():
-                        warnings = int(p)
-                        break
-
-        # 提取 hex 路径
-        hex_file = ""
-        for line in text.split("\n"):
-            if "file path:" in line.lower() or ".hex" in line:
-                hex_file = line.split(":", 1)[-1].strip().strip('"')
-
-        success = not is_error and errors == 0
-
-        print(json.dumps({
-            "status": "ok" if success else "error",
-            "action": "build",
-            "summary": f"build {'成功' if success else '失败'}，errors={errors} warnings={warnings}",
-            "details": {
-                "uid": uid,
-                "hex_file": hex_file,
-                "build_log": text[:2000],
-            },
-            "metrics": {"errors": errors, "warnings": warnings, "elapsed_ms": int(elapsed * 1000)},
-        }))
-    else:
-        print(json.dumps({
-            "status": "error",
-            "action": "build",
-            "error": result.get("error", {"message": "未知错误"}),
-        }))
+    uid = get_uid(args.workspace, args.uid)
+    if _assert_uid("build", uid): return
+    session = _mcp_init(args.mcp_url)
+    if _assert_session("build", session): return
+    print(json.dumps(_exec_build(session["session_id"], uid, args.mcp_url,
+                                 "build", "eide_build", args.no_reload)))
 
 
 def cmd_rebuild(args):
-    cfg = load_config()
-    uid = args.uid or cfg.get("uid", "")
-    if not uid:
-        print(json.dumps({"status": "error", "action": "rebuild", "error": {"code": "no_uid"}}))
-        return
-
-    # 重建前自动 reload，同步 Keil uvproj 更改
-    _ensure_reload(uid, args.mcp_url, args.no_reload)
-
-    result = mcp_call(args.mcp_url, "eide_rebuild", {"uid": uid})
-    if result.get("result"):
-        content = result["result"].get("content", [])
-        text = "\n".join(c.get("text", "") for c in content if c.get("type") == "text")
-        errors = 0
-        for line in text.split("\n"):
-            if "ERROR(S)" in line.upper() or "error(s)" in line.lower():
-                for p in line.split():
-                    if p.isdigit():
-                        errors = int(p); break
-        print(json.dumps({
-            "status": "ok" if (not result["result"].get("isError") and errors == 0) else "error",
-            "action": "rebuild",
-            "summary": f"rebuild {'成功' if errors == 0 else '失败'}",
-            "details": {"uid": uid, "build_log": text[:2000]},
-        }))
-    else:
-        print(json.dumps({"status": "error", "action": "rebuild", "error": result.get("error", {})}))
+    uid = get_uid(args.workspace, args.uid)
+    if _assert_uid("rebuild", uid): return
+    session = _mcp_init(args.mcp_url)
+    if _assert_session("rebuild", session): return
+    print(json.dumps(_exec_build(session["session_id"], uid, args.mcp_url,
+                                 "rebuild", "eide_rebuild", args.no_reload)))
 
 
 def cmd_clean(args):
-    cfg = load_config()
-    uid = args.uid or cfg.get("uid", "")
-    if not uid:
-        print(json.dumps({"status": "error", "action": "clean", "error": {"code": "no_uid"}}))
-        return
-    result = mcp_call(args.mcp_url, "eide_clean", {"uid": uid})
-    if result.get("result"):
-        content = result["result"].get("content", [])
-        text = "\n".join(c.get("text", "") for c in content if c.get("type") == "text")
-        print(json.dumps({"status": "ok", "action": "clean", "summary": "clean 成功", "details": {"uid": uid, "log": text[:1000]}}))
+    uid = get_uid(args.workspace, args.uid)
+    if _assert_uid("clean", uid): return
+    session = _mcp_init(args.mcp_url)
+    if _assert_session("clean", session): return
+
+    r = mcp_tool_call(args.mcp_url, session["session_id"], "eide_clean", {"uid": uid})
+    if r.get("result"):
+        text = "\n".join(c.get("text", "") for c in r["result"].get("content", []) if c.get("type") == "text")
+        print(json.dumps({"status": "ok", "action": "clean", "summary": "clean 成功",
+                          "details": {"uid": uid, "log": text[:1000]}}))
     else:
-        print(json.dumps({"status": "error", "action": "clean", "error": result.get("error", {})}))
+        print(json.dumps({"status": "error", "action": "clean", "error": r.get("error", {})}))
 
 
 def cmd_flash(args):
-    cfg = load_config()
-    uid = args.uid or cfg.get("uid", "")
+    uid = get_uid(args.workspace, args.uid)
     erase = args.erase_all or False
-    if not uid:
-        print(json.dumps({"status": "error", "action": "flash", "error": {"code": "no_uid"}}))
-        return
-    result = mcp_call(args.mcp_url, "eide_flash", {"uid": uid, "eraseAll": erase})
-    if result.get("result"):
-        content = result["result"].get("content", [])
-        text = "\n".join(c.get("text", "") for c in content if c.get("type") == "text")
-        is_error = result["result"].get("isError", False)
-        print(json.dumps({
-            "status": "ok" if not is_error else "error",
-            "action": "flash",
-            "summary": f"flash {'成功' if not is_error else '失败'}",
-            "details": {"uid": uid, "erase_all": erase, "log": text[:1000]},
-        }))
+    if _assert_uid("flash", uid): return
+
+    if erase and sys.stdin.isatty():
+        print("⚠️  即将擦除全片并烧录固件！", file=sys.stderr)
+        if input("确认？(yes/no): ").lower() != "yes":
+            print(json.dumps({"status": "cancelled", "action": "flash", "summary": "用户取消"}))
+            return
+
+    session = _mcp_init(args.mcp_url)
+    if _assert_session("flash", session): return
+
+    r = mcp_tool_call(args.mcp_url, session["session_id"], "eide_flash", {"uid": uid, "eraseAll": erase})
+    if r.get("result"):
+        text = "\n".join(c.get("text", "") for c in r["result"].get("content", []) if c.get("type") == "text")
+        err = r["result"].get("isError", False)
+        print(json.dumps({"status": "ok" if not err else "error", "action": "flash",
+                          "summary": f"flash {'成功' if not err else '失败'}",
+                          "details": {"uid": uid, "erase_all": erase, "log": text[:1000]}}))
     else:
-        print(json.dumps({"status": "error", "action": "flash", "error": result.get("error", {})}))
+        print(json.dumps({"status": "error", "action": "flash", "error": r.get("error", {})}))
 
 
-def cmd_uid(args):
-    """从 .eide/eide.yml 提取 UID。"""
-    eide_yml = os.path.join(args.workspace, ".eide", "eide.yml")
-    if not os.path.exists(eide_yml):
-        print(json.dumps({"status": "error", "action": "uid", "error": {"code": "not_found", "message": f"未找到 {eide_yml}"}}))
-        return
-    import re
-    with open(eide_yml, encoding="utf-8") as f:
-        content = f.read()
-    m = re.search(r'uid:\s*(\S+)', content)
-    if m:
-        uid = m.group(1)
-        cfg = load_config()
-        cfg["uid"] = uid
-        save_config(cfg)
-        print(json.dumps({"status": "ok", "action": "uid", "summary": f"UID: {uid}", "details": {"uid": uid, "saved_to": CONFIG_FILE}}))
-    else:
-        print(json.dumps({"status": "error", "action": "uid", "error": {"code": "not_found", "message": "eide.yml 中未找到 uid"}}))
-
+# ── 入口 ──────────────────────────────────────────────────
 
 def main():
-    cfg = load_config()
-
     parser = argparse.ArgumentParser(description="EIDE MCP 构建工具")
-    parser.add_argument("--mcp-url", default=cfg.get("mcp_url", "http://127.0.0.1:8940/mcp"))
-    parser.add_argument("--uid", default="")
-    parser.add_argument("--workspace", default=os.getcwd())
+    parser.add_argument("--mcp-url", default="http://127.0.0.1:8940/mcp",
+                        help="MCP 服务器地址（默认 http://127.0.0.1:8940/mcp）")
+    parser.add_argument("--uid", default="",
+                        help="Project UID（不指定则从 .eide/eide.yml 自动检测）")
+    parser.add_argument("--workspace", default=os.getcwd(),
+                        help="工程根目录（默认当前目录，用于查找 .eide/eide.yml）")
     parser.add_argument("--json", action="store_true", default=True, help=argparse.SUPPRESS)
 
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_check = sub.add_parser("check", help="检测 MCP 服务器连通性")
+    sub.add_parser("check", help="检测 MCP 服务器连通性")
 
-    p_build = sub.add_parser("build", help="构建（自动先 reload 同步 Keil 更改）")
-    p_build.add_argument("--no-reload", action="store_true", default=False, help="跳过构建前 reload")
-    p_rebuild = sub.add_parser("rebuild", help="全量重建（自动先 reload 同步 Keil 更改）")
-    p_rebuild.add_argument("--no-reload", action="store_true", default=False, help="跳过重建前 reload")
-    p_clean = sub.add_parser("clean", help="清理构建产物")
+    p = sub.add_parser("build", help="增量编译（自动先 reload）")
+    p.add_argument("--no-reload", action="store_true", default=False, help="跳过构建前 reload")
 
-    p_reload = sub.add_parser("reload", help="重载工程：同步 Keil uvproj 的更改到 EIDE 模型")
+    p = sub.add_parser("rebuild", help="全量重建（自动先 reload）")
+    p.add_argument("--no-reload", action="store_true", default=False, help="跳过重建前 reload")
 
-    p_addsrc = sub.add_parser("add-src-dir", help="添加源码目录到项目")
-    p_addsrc.add_argument("path", help="源码目录路径（相对 workspace）")
+    sub.add_parser("clean", help="清理构建产物")
+    sub.add_parser("reload", help="重载工程（同步 Keil uvproj 更改到 EIDE 模型）")
 
-    p_flash = sub.add_parser("flash", help="烧录固件")
-    p_flash.add_argument("--erase-all", action="store_true", default=False, help="烧录前擦除全片")
+    p = sub.add_parser("add-src-dir", help="添加源码目录")
+    p.add_argument("path", help="源码目录路径（相对 workspace）")
 
-    p_uid = sub.add_parser("uid", help="从 .eide/eide.yml 获取并保存 Project UID")
+    p = sub.add_parser("flash", help="烧录固件")
+    p.add_argument("--erase-all", action="store_true", default=False, help="烧录前擦除全片")
 
     args = parser.parse_args()
 
-    if args.command == "check":
-        cmd_check(args)
-    elif args.command == "build":
-        cmd_build(args)
-    elif args.command == "rebuild":
-        cmd_rebuild(args)
-    elif args.command == "reload":
-        cmd_reload(args)
-    elif args.command == "add-src-dir":
-        cmd_add_src_dir(args)
-    elif args.command == "clean":
-        cmd_clean(args)
-    elif args.command == "flash":
-        cmd_flash(args)
-    elif args.command == "uid":
-        cmd_uid(args)
+    command_map = {
+        "check": cmd_check, "build": cmd_build, "rebuild": cmd_rebuild,
+        "reload": cmd_reload, "add-src-dir": cmd_add_src_dir,
+        "clean": cmd_clean, "flash": cmd_flash,
+    }
+    command_map[args.command](args)
 
 
 if __name__ == "__main__":
