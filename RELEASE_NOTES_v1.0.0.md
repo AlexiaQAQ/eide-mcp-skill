@@ -13,7 +13,6 @@
 | `clean` | 清理构建产物 |
 | `flash --erase-all` | 烧录固件 |
 | `check` | 检测 MCP 服务器连通性 |
-| `uid` | 自动获取 Project UID |
 
 ### 依赖
 

@@ -416,7 +416,6 @@ def cmd_flash(args):
                               "error": {"code": "not_interactive",
                                         "message": "非交互式环境，--erase-all 需要 --force 确认"}}))
             return
-            return
 
     session = _mcp_init(args.mcp_url)
     if _assert_session("flash", session): return
