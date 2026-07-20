@@ -11,8 +11,14 @@ A [Claude Code](https://claude.ai/code) skill that controls [EIDE (Embedded IDE)
 ### Prerequisites
 
 - [Claude Code](https://claude.ai/code) (VS Code extension or CLI)
-- [EIDE](https://github.com/github0null/eide) VS Code extension (with **EIDE.MCP.Server: Enable** and port 8940)
+- [EIDE](https://github.com/github0null/eide) VS Code extension — **EIDE.MCP.Server must be enabled** (see below)
 - Python 3 (stdlib only, no extra dependencies)
+
+### Enable EIDE MCP Server
+
+In VS Code, open EIDE settings (**`Ctrl+,`** → search **`eide.mcp.server`**), enable the option **EIDE.MCP.Server: Enable** (default port 8940):
+
+![Enable EIDE.MCP.Server in VS Code settings](eide-mcp-enable.png)
 - A VSCode workspace with an EIDE-managed embedded project (`.eide/eide.yml`)
 
 ### Installation
@@ -21,10 +27,10 @@ Clone this repo into your Claude Code skills directory:
 
 ```bash
 # Linux / macOS
-git clone https://github.com/AlexiaQAQ/eide-skill.git ~/.claude/skills/eide
+git clone https://github.com/AlexiaQAQ/eide-mcp-skill.git ~/.claude/skills/eide
 
 # Windows (PowerShell)
-git clone https://github.com/AlexiaQAQ/eide-skill.git $env:USERPROFILE\.claude\skills\eide
+git clone https://github.com/AlexiaQAQ/eide-mcp-skill.git $env:USERPROFILE\.claude\skills\eide
 ```
 
 Or copy the `eide` folder into `C:\Users\<you>\.claude\skills\`.
@@ -70,10 +76,16 @@ MIT
 
 ```bash
 # Windows
-git clone https://github.com/AlexiaQAQ/eide-skill.git %USERPROFILE%\.claude\skills\eide
+git clone https://github.com/AlexiaQAQ/eide-mcp-skill.git %USERPROFILE%\.claude\skills\eide
 ```
 
 或将 `eide` 文件夹复制到 `C:\Users\你的用户名\.claude\skills\`。
+
+### 启用 EIDE MCP Server
+
+在 VS Code 中打开 EIDE 设置（**`Ctrl+,`** → 搜索 **`eide.mcp.server`**），勾选 **EIDE.MCP.Server: Enable**（默认端口 8940）：
+
+![启用 EIDE.MCP.Server](eide-mcp-enable.png)
 
 重启 Claude Code 即可自动注册。
 
@@ -104,6 +116,7 @@ python <skill-dir>/scripts/eide.py flash --erase-all    # 烧录
 eide/
 ├── SKILL.md             技能定义（前端文案 + 自动触发条件）
 ├── config.example.json  配置模板（复制为 config.json 后使用）
+├── eide-mcp-enable.png   EIDE MCP Server 设置截图
 ├── package.json         插件元数据
 ├── scripts/
 │   └── eide.py          Python 脚本（封装 MCP 调用，纯标准库）
