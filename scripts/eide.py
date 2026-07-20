@@ -14,6 +14,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import time
 import urllib.request
 import urllib.error
@@ -182,6 +183,17 @@ def _exec_build(session_id: str, uid: str, mcp_url: str, workspace: str,
     }
 
 
+# ── 路径安全校验 ──────────────────────────────────────────
+
+def _sanitize_path(workspace: str, rel_path: str) -> str:
+    """规范化相对路径，确保不穿越 workspace 根目录。返回绝对路径，非法时返回空字符串。"""
+    abs_path = os.path.normpath(os.path.join(workspace, rel_path))
+    abs_workspace = os.path.normpath(os.path.abspath(workspace))
+    if not abs_path.startswith(abs_workspace + os.sep) and abs_path != abs_workspace:
+        return ""
+    return abs_path
+
+
 # ── 命令处理 ──────────────────────────────────────────────
 
 # ── EIDE 模型同步 ─────────────────────────────────────────
@@ -190,21 +202,26 @@ def _exec_build(session_id: str, uid: str, mcp_url: str, workspace: str,
 
 
 def _get_uvproj_groups(workspace: str) -> set:
-    """解析 Keil uvproj XML，返回所有 group 名称。"""
+    """解析 Keil uvproj XML，返回所有 group 名称。
+    优先匹配目录名同名的 .uvproj，再回退到任意 .uvproj。"""
     import xml.etree.ElementTree as ET
-    for f in os.listdir(workspace):
-        if f.endswith('.uvproj'):
-            try:
-                tree = ET.parse(os.path.join(workspace, f))
-            except ET.ParseError:
-                return set()
-            groups = set()
-            for g in tree.iter('Group'):
-                gn = g.find('GroupName')
-                if gn is not None and gn.text:
-                    groups.add(gn.text)
-            return groups
-    return set()
+    files = sorted(f for f in os.listdir(workspace) if f.endswith('.uvproj'))
+    if not files:
+        return set()
+    # 优先选择与 workspace 目录同名的 uvproj
+    proj_name = os.path.basename(os.path.normpath(workspace))
+    preferred = [f for f in files if os.path.splitext(f)[0] == proj_name]
+    target = preferred[0] if preferred else files[0]
+    try:
+        tree = ET.parse(os.path.join(workspace, target))
+    except ET.ParseError:
+        return set()
+    groups = set()
+    for g in tree.iter('Group'):
+        gn = g.find('GroupName')
+        if gn is not None and gn.text:
+            groups.add(gn.text)
+    return groups
 
 
 def _sync_eide_model(workspace: str) -> dict:
@@ -258,8 +275,16 @@ def _sync_eide_model(workspace: str) -> dict:
         if not skip_block:
             new_lines.append(line)
 
-    with open(yml, "w", encoding="utf-8") as f:
-        f.writelines(new_lines)
+    # 先写临时文件，再原子替换，避免写入中断损坏配置
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(yml), suffix=".tmp", prefix=".eide-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.writelines(new_lines)
+        os.replace(tmp, yml)
+    except Exception:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
 
     return {"status": "ok"}
 
@@ -318,6 +343,14 @@ def cmd_reload(args):
 def cmd_add_src_dir(args):
     uid = get_uid(args.workspace, args.uid)
     if _assert_uid("add-src-dir", uid): return
+
+    safe_path = _sanitize_path(args.workspace, args.path)
+    if not safe_path:
+        print(json.dumps({"status": "error", "action": "add-src-dir",
+                          "error": {"code": "invalid_path",
+                                    "message": f"路径不在 workspace 内或非法: {args.path}"}}))
+        return
+
     session = _mcp_init(args.mcp_url)
     if _assert_session("add-src-dir", session): return
 
@@ -369,12 +402,20 @@ def cmd_clean(args):
 def cmd_flash(args):
     uid = get_uid(args.workspace, args.uid)
     erase = args.erase_all or False
+    force = getattr(args, "force", False)
     if _assert_uid("flash", uid): return
 
-    if erase and sys.stdin.isatty():
-        print("⚠️  即将擦除全片并烧录固件！", file=sys.stderr)
-        if input("确认？(yes/no): ").lower() != "yes":
-            print(json.dumps({"status": "cancelled", "action": "flash", "summary": "用户取消"}))
+    if erase and not force:
+        if sys.stdin.isatty():
+            print("⚠️  即将擦除全片并烧录固件！", file=sys.stderr)
+            if input("确认？(yes/no): ").lower() != "yes":
+                print(json.dumps({"status": "cancelled", "action": "flash", "summary": "用户取消"}))
+                return
+        else:
+            print(json.dumps({"status": "error", "action": "flash",
+                              "error": {"code": "not_interactive",
+                                        "message": "非交互式环境，--erase-all 需要 --force 确认"}}))
+            return
             return
 
     session = _mcp_init(args.mcp_url)
@@ -420,6 +461,7 @@ def main():
 
     p = sub.add_parser("flash", help="烧录固件")
     p.add_argument("--erase-all", action="store_true", default=False, help="烧录前擦除全片")
+    p.add_argument("--force", action="store_true", default=False, help="跳过确认提示（适用于 CI/CD 等非交互式环境）")
 
     args = parser.parse_args()
 
