@@ -18,6 +18,15 @@ import time
 import urllib.request
 import urllib.error
 
+# ── 递增 ID（替代时间戳，避免碰撞）───────────────────────────
+
+_request_id = 0
+
+def _next_id() -> int:
+    global _request_id
+    _request_id += 1
+    return _request_id
+
 
 # ── UID 自动检测 ──────────────────────────────────────────
 
@@ -40,7 +49,7 @@ def get_uid(workspace: str, uid_override: str = "") -> str:
 def _mcp_init(mcp_url: str) -> dict:
     """初始化 MCP 连接，返回 {"status": "ok", "session_id": "..."} 或错误 dict。"""
     req_body = {
-        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "jsonrpc": "2.0", "id": _next_id(), "method": "initialize",
         "params": {
             "protocolVersion": "2024-11-05",
             "capabilities": {},
@@ -78,12 +87,12 @@ def _parse_response(raw: str) -> dict:
             pass
     data_lines = []
     for line in text.split("\n"):
-        line = line.strip()
+        line = line.rstrip("\n\r")
         if line.startswith("data: "):
             data_lines.append(line[6:])
     if data_lines:
         try:
-            return json.loads("".join(data_lines))
+            return json.loads("\n".join(data_lines))
         except json.JSONDecodeError:
             pass
     return {"status": "error", "error": {"code": "bad_response", "message": f"未找到 JSON。原始响应: {raw[:500]}"}}
@@ -93,7 +102,7 @@ def mcp_tool_call(mcp_url: str, session_id: str, method: str, params: dict = Non
     """在已初始化的 session 中调用 MCP 工具。"""
     req_body = {
         "jsonrpc": "2.0",
-        "id": int(time.time() * 1000) % 100000,
+        "id": _next_id(),
         "method": "tools/call",
         "params": {"name": method, "arguments": params or {}},
     }
@@ -112,6 +121,8 @@ def mcp_tool_call(mcp_url: str, session_id: str, method: str, params: dict = Non
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
         return {"status": "error", "error": {"code": "mcp_call_failed", "message": str(e), "body": body}}
+    except urllib.error.URLError as e:
+        return {"status": "error", "error": {"code": "mcp_call_failed", "message": str(e)}}
     return _parse_response(resp.read().decode("utf-8"))
 
 
@@ -122,20 +133,21 @@ def _ensure_reload(session_id: str, uid: str, mcp_url: str, no_reload: bool, wor
     if no_reload:
         return {"status": "ok", "skipped": True}
     result = mcp_tool_call(mcp_url, session_id, "eide_reload", {"uid": uid})
-    if workspace:
+    reload_ok = result.get("status") != "error" and not result.get("result", {}).get("isError")
+    if workspace and reload_ok:
         _sync_eide_model(workspace)
     return result
 
 
 def _parse_build_result(text: str) -> tuple:
     """从构建日志提取 (errors, warnings, hex_file)。"""
-    em = re.search(r'(\d+)\s*error\s*\(', text, re.IGNORECASE)
-    wm = re.search(r'(\d+)\s*warning\s*\(', text, re.IGNORECASE)
+    em = re.search(r'(\d+)\s*error\b', text, re.IGNORECASE)
+    wm = re.search(r'(\d+)\s*warning\b', text, re.IGNORECASE)
     errors = int(em.group(1)) if em else 0
     warnings = int(wm.group(1)) if wm else 0
     hex_file = ""
     for line in text.split("\n"):
-        if "file path:" in line.lower() or ".hex" in line:
+        if "file path:" in line.lower() or re.search(r'\.hex\b', line):
             hex_file = line.split(":", 1)[-1].strip().strip('"')
     return errors, warnings, hex_file
 
@@ -182,7 +194,10 @@ def _get_uvproj_groups(workspace: str) -> set:
     import xml.etree.ElementTree as ET
     for f in os.listdir(workspace):
         if f.endswith('.uvproj'):
-            tree = ET.parse(os.path.join(workspace, f))
+            try:
+                tree = ET.parse(os.path.join(workspace, f))
+            except ET.ParseError:
+                return set()
             groups = set()
             for g in tree.iter('Group'):
                 gn = g.find('GroupName')
@@ -219,18 +234,24 @@ def _sync_eide_model(workspace: str) -> dict:
                 in_folders = True
             continue
 
+        # 空白行 → 按当前 skip_block 状态保留
+        if not stripped:
+            if not skip_block:
+                new_lines.append(line)
+            continue
+
+        # 缩进回到根级别（< 4 空格）→ 退出 folders 块
+        if not line.startswith("    "):
+            in_folders = False
+            new_lines.append(line)
+            continue
+
         # 检测 folder 条目 "    - name: XXX"
         if stripped.startswith("- name:") and line.startswith("    "):
             name = stripped.split(":", 1)[1].strip()
             skip_block = name not in groups
             if not skip_block:
                 new_lines.append(line)
-            continue
-
-        # 退出 folders: 块
-        if line.lstrip().startswith("dependenceList"):
-            in_folders = False
-            new_lines.append(line)
             continue
 
         # 当前 folder 内普通行
@@ -279,7 +300,8 @@ def cmd_reload(args):
     if _assert_session("reload", session): return
 
     r = mcp_tool_call(args.mcp_url, session["session_id"], "eide_reload", {"uid": uid})
-    clean_result = _sync_eide_model(args.workspace)
+    reload_ok = r.get("status") != "error" and not r.get("result", {}).get("isError")
+    clean_result = _sync_eide_model(args.workspace) if reload_ok else {}
 
     if r.get("result"):
         text = "\n".join(c.get("text", "") for c in r["result"].get("content", []) if c.get("type") == "text")
@@ -379,7 +401,6 @@ def main():
                         help="Project UID（不指定则从 .eide/eide.yml 自动检测）")
     parser.add_argument("--workspace", default=os.getcwd(),
                         help="工程根目录（默认当前目录，用于查找 .eide/eide.yml）")
-    parser.add_argument("--json", action="store_true", default=True, help=argparse.SUPPRESS)
 
     sub = parser.add_subparsers(dest="command", required=True)
 

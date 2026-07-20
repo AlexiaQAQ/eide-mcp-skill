@@ -13,13 +13,13 @@ A [Claude Code](https://claude.ai/code) skill that controls [EIDE (Embedded IDE)
 - [Claude Code](https://claude.ai/code) (VS Code extension or CLI)
 - [EIDE](https://github.com/github0null/eide) VS Code extension — **EIDE.MCP.Server must be enabled** (see below)
 - Python 3 (stdlib only, no extra dependencies)
+- A VSCode workspace with an EIDE-managed embedded project (`.eide/eide.yml`)
 
 ### Enable EIDE MCP Server
 
 In VS Code, open EIDE settings (**`Ctrl+,`** → search **`eide.mcp.server`**), enable the option **EIDE.MCP.Server: Enable** (default port 8940):
 
 ![Enable EIDE.MCP.Server in VS Code settings](eide-mcp-enable.png)
-- A VSCode workspace with an EIDE-managed embedded project (`.eide/eide.yml`)
 
 ### Installation
 
