@@ -54,6 +54,7 @@ Or simply mention "EIDE" in Claude Code — the skill triggers automatically.
 |---------|------|-------------|
 | `/eide check` | low | Ping the MCP server |
 | `/eide reload` | low | Reload project — sync Keil uvproj changes into EIDE model |
+| `/eide add-src-dir <path>` | medium | Add a source directory (all .c/.cpp files under it will be compiled) |
 | `/eide build` | medium | Incremental build (auto-reloads before build) |
 | `/eide rebuild` | medium | Full rebuild (auto-reloads before rebuild) |
 | `/eide clean` | high | Clean build artifacts |
@@ -107,6 +108,7 @@ python <skill-dir>/scripts/eide.py flash --erase-all    # 烧录
 |------|------|------|
 | `/eide check` | 低 | 检测 MCP 服务器连通性 |
 | `/eide reload` | 低 | 重载工程 — 同步 Keil uvproj 更改到 EIDE 模型 |
+| `/eide add-src-dir <path>` | 中 | 添加源码目录，该目录下的 .c/.cpp 文件参与编译 |
 | `/eide build` | 中 | 增量编译（自动先 reload） |
 | `/eide rebuild` | 中 | 全量重建（自动先 reload） |
 | `/eide clean` | 高 | 清理构建产物 |

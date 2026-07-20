@@ -129,6 +129,30 @@ def cmd_reload(args):
         print(json.dumps({"status": "error", "action": "reload", "error": result.get("error", {})}))
 
 
+def cmd_add_src_dir(args):
+    """添加源码目录：将目录下的 .c/.cpp 文件加入编译。"""
+    cfg = load_config()
+    uid = args.uid or cfg.get("uid", "")
+    if not uid:
+        print(json.dumps({"status": "error", "action": "add-src-dir", "error": {"code": "no_uid"}}))
+        return
+    path = args.path
+    result = mcp_call(args.mcp_url, "eide_add_src_dir", {"uid": uid, "path": path})
+    if result.get("result"):
+        content = result["result"].get("content", [])
+        text = "\n".join(c.get("text", "") for c in content if c.get("type") == "text")
+        is_error = result["result"].get("isError", False)
+        print(json.dumps({
+            "status": "ok" if not is_error else "error",
+            "action": "add-src-dir",
+            "summary": f"添加源码目录 {'成功' if not is_error else '失败'}: {path}",
+            "details": {"uid": uid, "path": path, "log": text[:1000]},
+            "next_actions": [f"下次 build/rebuild 时会自动编译 {path} 下的源文件"],
+        }))
+    else:
+        print(json.dumps({"status": "error", "action": "add-src-dir", "error": result.get("error", {})}))
+
+
 def _ensure_reload(uid: str, mcp_url: str, no_reload: bool) -> dict:
     """构建/重建前自动 reload，确保 EIDE 模型与 keil uvproj 同步。"""
     if no_reload:
@@ -325,6 +349,9 @@ def main():
 
     p_reload = sub.add_parser("reload", help="重载工程：同步 Keil uvproj 的更改到 EIDE 模型")
 
+    p_addsrc = sub.add_parser("add-src-dir", help="添加源码目录到项目")
+    p_addsrc.add_argument("path", help="源码目录路径（相对 workspace）")
+
     p_flash = sub.add_parser("flash", help="烧录固件")
     p_flash.add_argument("--erase-all", action="store_true", default=False, help="烧录前擦除全片")
 
@@ -340,6 +367,8 @@ def main():
         cmd_rebuild(args)
     elif args.command == "reload":
         cmd_reload(args)
+    elif args.command == "add-src-dir":
+        cmd_add_src_dir(args)
     elif args.command == "clean":
         cmd_clean(args)
     elif args.command == "flash":

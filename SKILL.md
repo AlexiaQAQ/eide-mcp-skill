@@ -48,6 +48,7 @@ python <skill-dir>/scripts/eide.py uid --workspace <工程根目录> --json
 | `build` | 增量编译（先自动 reload 同步 Keil 更改） | 中 |
 | `rebuild` | 全量重建（先自动 reload 同步 Keil 更改） | 中 |
 | `reload` | 重载工程：同步 Keil uvproj 的更改到 EIDE 模型 | 低 |
+| `add-src-dir <path>` | 添加源码目录，该目录下的 .c/.cpp 文件将参与编译 | 中 |
 | `clean` | 清理构建产物 | 高 |
 | `flash` | 烧录固件到 MCU | 高 |
 | `uid` | 从 `.eide/eide.yml` 提取并保存 UID | 低 |
@@ -112,4 +113,10 @@ python <skill-dir>/scripts/eide.py clean
 
 # 烧录（--erase-all 放在子命令后面）
 python <skill-dir>/scripts/eide.py flash --erase-all
+
+# 添加源码目录（路径相对 workspace）
+python <skill-dir>/scripts/eide.py add-src-dir drivers
+
+# 重载工程（同步 Keil uvproj 更改）
+python <skill-dir>/scripts/eide.py reload
 ```
