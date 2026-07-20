@@ -126,8 +126,8 @@ def _ensure_reload(session_id: str, uid: str, mcp_url: str, no_reload: bool) -> 
 
 def _parse_build_result(text: str) -> tuple:
     """从构建日志提取 (errors, warnings, hex_file)。"""
-    em = re.search(r'(\d+)\s*[Ee]rror\s*\(', text)
-    wm = re.search(r'(\d+)\s*[Ww]arning\s*\(', text)
+    em = re.search(r'(\d+)\s*error\s*\(', text, re.IGNORECASE)
+    wm = re.search(r'(\d+)\s*warning\s*\(', text, re.IGNORECASE)
     errors = int(em.group(1)) if em else 0
     warnings = int(wm.group(1)) if wm else 0
     hex_file = ""
